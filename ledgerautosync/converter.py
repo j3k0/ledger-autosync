@@ -116,11 +116,11 @@ class Posting(object):
         self.unit_price = unit_price
 
     def format(self, indent=4):
-        space_count = 52 - indent - len(self.account) - len(self.amount.format())
-        if space_count < 2:
-            space_count = 2
+        #space_count = 52 - indent - len(self.account) - len(self.amount.format())
+        #if space_count < 2:
+        #    space_count = 2
         retval = "%s%s%s%s" % (
-            " " * indent, self.account, " "*space_count, self.amount.format())
+            " " * indent, self.account, "\t ", self.amount.format())
         if self.asserted is not None:
             retval = "%s = %s"%(retval, self.asserted.format())
         if self.unit_price is not None:
@@ -148,7 +148,7 @@ class Amount(object):
         if self.number.is_signed() != self.reverse:
             prefix = "-"
         else:
-            prefix = ""
+            prefix = " "
         if len(currency) == 1:
             # $ comes before
             return "%s%s%s" % (prefix, currency, number)
@@ -156,8 +156,8 @@ class Amount(object):
             # USD comes after
             return "%s%s %s" % (prefix, number, currency)
 
-
 class Converter(object):
+
     @staticmethod
     def clean_id(id):
         return id.replace('/', '_').\
@@ -176,13 +176,13 @@ class Converter(object):
         if self.currency == "USD":
             self.currency = "$"
 
-    def mk_dynamic_account(self, payee, exclude):
+    def mk_dynamic_account(self, payee, exclude, date=None, index=1):
         if self.lgr is None:
-            return self.unknownaccount or 'Expenses:Misc'
+            return self.unknownaccount or 'Expenses:Unknown'
         else:
-            account = self.lgr.get_account_by_payee(payee, exclude)
+            account = self.lgr.xact_account(payee, date, index)
             if account is None:
-                return self.unknownaccount or 'Expenses:Misc'
+                return self.unknownaccount or 'Expenses:Unknown'
             else:
                 return account
 
@@ -218,9 +218,10 @@ class OfxConverter(Converter):
         payee = None
         memo = None
         if (hasattr(txn, 'payee')):
-            payee = txn.payee
+            payee = txn.payee.replace('ACHAT CB ', '')
+            payee = re.sub(r' [0-9][0-9]\.[0-9][0-9]\.[0-9][0-9]', '', payee).upper()
         if (hasattr(txn, 'memo')):
-            memo = txn.memo
+            memo = txn.memo.upper()
 
         if (payee is None or payee == '') and (memo is None or memo == ''):
             retval = "%s: %s"%(self.name, txn.type)
@@ -263,6 +264,8 @@ class OfxConverter(Converter):
             initbal = statement.balance
             for txn in statement.transactions:
                 initbal -= txn.amount
+            metadata={}
+            metadata[("ofxid%s" % self.fid)] = self.mk_ofxid(AUTOSYNC_INITIAL)
             return Transaction(
                 date=statement.start_date,
                 payee="--Autosync Initial Balance",
@@ -275,7 +278,7 @@ class OfxConverter(Converter):
                         "Assets:Equity",
                         Amount(initbal, currency=self.currency, reverse=True)).format(self.indent)
                     ],
-                metadata={ "ofxid": self.mk_ofxid(AUTOSYNC_INITIAL) }
+                metadata=metadata
             ).format(self.indent)
         else:
             return ""
@@ -297,17 +300,19 @@ class OfxConverter(Converter):
         ofxid = self.mk_ofxid(txn.id)
 
         if isinstance(txn, OfxTransaction):
+            metadata = {}
+            metadata["ofxid%s" % self.fid] = ofxid
             return Transaction(
                 date=txn.date,
                 payee=self.format_payee(txn),
-                metadata={"ofxid": ofxid},
+                metadata=metadata,
                 postings=[
                     Posting(
                         self.name,
                         Amount(txn.amount, self.currency)
                     ),
                     Posting(
-                        self.mk_dynamic_account(self.format_payee(txn), exclude=self.name),
+                        self.mk_dynamic_account(self.format_payee(txn), exclude=self.name, date=txn.date, index=1),
                         Amount(txn.amount, self.currency, reverse=True)
                     )]
             )
@@ -318,7 +323,8 @@ class OfxConverter(Converter):
             posting1 = None
             posting2 = None
 
-            metadata = {"ofxid": ofxid}
+            metadata = {}
+            metadata["ofxid"%self.fid] = ofxid
 
             security = self.maybe_get_ticker(txn.security)
 
@@ -409,6 +415,9 @@ class CsvConverter(Converter):
             h.update("%s=%s\n"%(key, row[key]))
         return h.hexdigest()
 
+    def get_csv_metadata(self):
+        return "csvid"
+
     def __init__(self, csv, name=None, indent=4, ledger=None, unknownaccount=None):
         super(CsvConverter, self).__init__(
             ledger=ledger,
@@ -424,6 +433,9 @@ class PaypalConverter(CsvConverter):
     def __init__(self, *args, **kwargs):
         super(PaypalConverter, self).__init__(*args, **kwargs)
 
+    def get_csv_metadata(self):
+        return "paypal_id"
+
     def get_csv_id(self, row):
         return "paypal.%s"%(Converter.clean_id(row['Transaction ID']))
 
@@ -431,15 +443,19 @@ class PaypalConverter(CsvConverter):
         if (((row['Status'] != "Completed") and (row['Status'] != "Refunded") and (row['Status'] != "Reversed")) or (row['Type'] == "Shopping Cart Item")):
             return ""
         else:
+            payee=re.sub(
+                    r"\s+", " ",
+                    "%s %s %s ID: %s, %s"%(row['Name'], row['To Email Address'], row['Item Title'], row['Transaction ID'], row['Type'])).upper()
             currency = row['Currency']
-            if row['Type'] == "Add Funds from a Bank Account" or row['Type'] == "Charge From Debit Card":
+            date = datetime.datetime.strptime(row['Date'], "%d/%m/%Y")
+            if "add funds from a bank account" in row['Type'].lower() or row['Type'] == "Charge From Debit Card":
                 postings=[
                     Posting(
                         self.name,
                         Amount(Decimal(row['Net']), currency)
                     ),
                     Posting(
-                        "Transfer:Paypal",
+                        "Liabilities:Transfer:Bank:Lbp:Paypal",
                         Amount(Decimal(row['Net']), currency, reverse=True)
                     )]
             else:
@@ -449,16 +465,15 @@ class PaypalConverter(CsvConverter):
                         Amount(Decimal(row['Gross']), currency)
                     ),
                     Posting(
-                        # TODO Our payees are breaking the payee search in mk_dynamic_account
-                        "Expenses:Misc", #self.mk_dynamic_account(payee, exclude=self.name),
+                        self.mk_dynamic_account(payee, exclude=self.name, date=date, index=1),
                         Amount(Decimal(row['Gross']), currency, reverse=True)
                     )]
+            metadata={}
+            metadata[self.get_csv_metadata()] = self.get_csv_id(row)
             return Transaction(
-                date=datetime.datetime.strptime(row['Date'], "%m/%d/%Y"),
-                payee=re.sub(
-                    r"\s+", " ",
-                    "%s %s %s ID: %s, %s"%(row['Name'], row['To Email Address'], row['Item Title'], row['Transaction ID'], row['Type'])),
-                metadata={"csvid": self.get_csv_id(row)},
+                date=date,
+                payee=payee,
+                metadata=metadata,
                 postings=postings)
 
 
@@ -513,4 +528,203 @@ class MintConverter(CsvConverter):
             date=datetime.datetime.strptime(row['Date'], "%m/%d/%Y"),
             metadata={"csvid": "mint.%s"%(self.get_csv_id(row))},
             payee=row['Description'],
+            postings=postings)
+
+class UpworkConverter(CsvConverter):
+    FIELDSET = set(['Date','Ref ID','Type','Description','Agency','Freelancer','Team','Account Name','PO','Amount','Amount in local currency','Currency','Balance'])
+
+    def __init__(self, *args, **kwargs):
+        super(UpworkConverter, self).__init__(*args, **kwargs)
+
+    def mk_amount(self, row, reverse=False):
+        return Amount(Decimal(row['Amount']), 'USD', reverse=reverse)
+
+    def get_csv_metadata(self):
+        return "upwork_id"
+
+    def get_csv_id(self, row):
+        return "upwork.%s"%(Converter.clean_id(row['Ref ID']))
+
+    def get_freelancer(self, row):
+        return row['Freelancer'].lower().partition(' ')[0]
+
+    def get_freelancer_account(self, row):
+        simi = self.lgr.most_similar_account("Expenses:Fovea:Team:%s" % self.get_freelancer(row))
+        if simi is None:
+            return self.get_freelancer(row)
+        else:
+            return simi
+
+    def convert(self, row):
+        account = self.name
+        payee = row['Description'].upper()
+        if 'PAYPAL' in payee:
+            account = 'Transfer:Upwork:Paypal'
+        if account is None:
+            account = row['Account Name']
+        postings = []
+        if (row['Type'] == 'Hourly') or (row['Type'] == 'Fixed Price') or (row['Type'] == 'Bonus'):
+            if 'FUNDING REQUEST FOR' in payee:
+                postings = [Posting('Asset:Upwork', self.mk_amount(row, reverse=True)),
+                            Posting('Asset:Upwork', self.mk_amount(row))]
+            else:
+                postings = [Posting('Assets:Upwork', self.mk_amount(row)),
+                            Posting(self.get_freelancer_account(row), self.mk_amount(row, reverse=True))]
+        elif (row['Type'] == 'Processing Fee'):
+            postings = [Posting('Assets:Upwork', self.mk_amount(row)),
+                        Posting('Expenses:Fovea:Tool:Upwork', self.mk_amount(row, reverse=True))]
+        elif (row['Type'] == 'Payment'):
+            if 'FROM ESCROW' in payee:
+                postings = [Posting('Assets:Upwork', self.mk_amount(row, reverse=True)),
+                            Posting('Assets:Upwork', self.mk_amount(row))]
+            else:
+                postings = [Posting(account, self.mk_amount(row, reverse=True)),
+                            Posting('Assets:Upwork', self.mk_amount(row))]
+
+        metadata = {}
+        metadata[self.get_csv_metadata()] = self.get_csv_id(row)
+        return Transaction(
+            date=datetime.datetime.strptime(row['Date'], "%b %d, %Y"),
+            metadata=metadata,
+            payee=payee,
+            postings=postings)
+
+class BlomConverter(CsvConverter):
+    FIELDSET = set(['Currency', 'Business Date','Value Date','Narrative','Amount','Balance','Transac. Ref.'])
+
+    def __init__(self, *args, **kwargs):
+        super(BlomConverter, self).__init__(*args, **kwargs)
+        self.id = kwargs['name'][-3:]
+
+    def get_csv_metadata(self):
+        return "blom%s_tref" % self.id.lower()
+
+    def get_csv_id(self, row):
+        h = hashlib.sha224(row['Narrative'] + row['Balance']).hexdigest()[0:12]
+        return "%s-%s"%(Converter.clean_id(row['Transac. Ref.']), h)
+
+    def mk_amount(self, row, reverse=False):
+        return Amount(Decimal(row['Amount'].replace(',','')), row['Currency'], reverse=reverse)
+
+    # def mk_account(
+
+    def convert(self, row):
+        account = self.name
+        date = datetime.datetime.strptime(row['Business Date'], "%d-%b-%Y")
+        payee = row['Narrative'].upper()
+        if account is None:
+            account = 'Assets:Bank:Blom'
+        if float(row['Amount'].replace(',','')) > 0:
+            postings = [Posting(account, self.mk_amount(row)),
+                        Posting(self.mk_dynamic_account(payee, '', date, 1), self.mk_amount(row, reverse=True))]
+        else:
+            postings = [Posting(account, self.mk_amount(row)),
+                        Posting(self.mk_dynamic_account(payee, '', date, 1), self.mk_amount(row, reverse=True))]
+        metadata={}
+        metadata[self.get_csv_metadata()] = self.get_csv_id(row)
+        return Transaction(
+            date=date,
+            metadata=metadata,
+            payee=payee,
+            postings=postings)
+
+class HubstaffConverter(CsvConverter):
+    FIELDSET = set(['Organization','Time Zone','Date','Member','Project','Project Hours','Tasks','Task Hours','Activity','Notes'])
+
+    def __init__(self, *args, **kwargs):
+        super(HubstaffConverter, self).__init__(*args, **kwargs)
+
+    def get_csv_metadata(self):
+        return "hubstaff"
+
+    def get_csv_id(self, row):
+        h = hashlib.sha224(row['Member'] + row['Date'] + row['Project']).hexdigest()[0:12]
+        return h
+
+    def initials(self, row):
+        ret = ''
+        for p in row['Member'].lower().partition(' '):
+            if p != ' ':
+                ret = ret + p[0]
+        return ret
+
+    def mk_amount(self, row, reverse=False):
+        h,m,s = row['Project Hours'].split(':')
+        h = float(h) + float(m) / 60 + float(s) / 3600
+        return Amount(Decimal(h), self.initials(row) + '_h', reverse=reverse)
+
+    def get_freelancer_account(self, row):
+        simi = self.lgr.most_similar_account("Expenses:Fovea:Team:%s" % self.get_freelancer(row))
+        if simi is None:
+            return self.get_freelancer(row)
+        else:
+            return simi
+
+    def get_freelancer(self, row):
+        return row['Member'].lower().partition(' ')[0]
+
+    def convert(self, row):
+        date = datetime.datetime.strptime(row['Date'], "%Y-%m-%d")
+        payee = (row['Member'] + ' WORK ON ' + row['Project']).upper()
+        # freelancer_account = self.get_freelancer_account(row)
+        freelancer_account = self.mk_dynamic_account(payee, '', date, 0)
+        project_account = self.mk_dynamic_account(payee, '', date, 1)
+        postings = [Posting('%s' % freelancer_account, self.mk_amount(row, reverse=True)),
+                    Posting('%s' % project_account, self.mk_amount(row, reverse=False))]
+        metadata={}
+        metadata[self.get_csv_metadata()] = self.get_csv_id(row)
+        return Transaction(
+            date=date,
+            metadata=metadata,
+            payee=payee,
+            postings=postings)
+
+class WakatimeConverter(CsvConverter):
+    FIELDSET = set(["Account","Commodity", "Date","Project","Duration","ID"])
+
+    def __init__(self, *args, **kwargs):
+        super(WakatimeConverter, self).__init__(*args, **kwargs)
+
+    def get_csv_metadata(self):
+        return "wakatime"
+
+    def get_csv_id(self, row):
+        return row["ID"]
+
+    def initials(self, row):
+        ret = ''
+        for p in row['Member'].lower().partition(' '):
+            if p != ' ':
+                ret = ret + p[0]
+        return ret
+
+    def mk_amount(self, row, reverse=False):
+        s = float(row['Duration'])
+        h = s / 3600
+        return Amount(Decimal(h), row["Commodity"], reverse=reverse)
+
+    # def get_freelancer_account(self, row):
+    #     return "Expenses:Fovea:%s" % row["Account"]
+
+    def get_freelancer(self, row):
+        return row['Account'].partition(':')[-1].lower()
+
+    def convert(self, row):
+        date = datetime.datetime.strptime(row['Date'], "%Y/%m/%d")
+        payee = (self.get_freelancer(row) + ' WORK ON ' + row['Project']).upper()
+        # freelancer_account = "Liabilities:" + row["Account"]
+        freelancer_account = self.mk_dynamic_account(payee, '', date, 0)
+        project_account = self.mk_dynamic_account(payee, '', date, 1)
+        if project_account == 'Equity:Founders':
+            tmp = project_account
+            project_account = freelancer_account
+            freelancer_account = tmp
+        postings = [Posting('%s' % freelancer_account, self.mk_amount(row, reverse=True)),
+                    Posting('%s' % project_account, self.mk_amount(row, reverse=False))]
+        metadata={}
+        metadata[self.get_csv_metadata()] = self.get_csv_id(row)
+        return Transaction(
+            date=date,
+            metadata=metadata,
+            payee=payee,
             postings=postings)

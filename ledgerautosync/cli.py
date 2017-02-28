@@ -82,7 +82,8 @@ def print_results(converter, ofx, ledger, txns, args):
             print converter.format_position(pos)
 
 def sync(ledger, accounts, args):
-    sync = OfxSynchronizer(ledger)
+    sync = OfxSynchronizer(ledger,
+                           fid=args.fid)
     for acct in accounts:
         try:
             (ofx, txns) = sync.get_new_txns(acct, resync=args.resync,
@@ -103,7 +104,7 @@ def sync(ledger, accounts, args):
 
 
 def import_ofx(ledger, args):
-    sync = OfxSynchronizer(ledger)
+    sync = OfxSynchronizer(ledger, args.fid)
     (ofx, txns) = sync.parse_file(args.PATH)
     accountname = args.account
     if accountname is None:

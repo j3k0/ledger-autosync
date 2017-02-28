@@ -92,6 +92,9 @@ def mk_ledger(ledger_file):
             raise Exception("Neither ledger 3 nor hledger found!")
 
 class Ledger(object):
+
+    allTransactions = None
+
     def __init__(self, ledger_file=None, no_pipe=True):
         if distutils.spawn.find_executable('ledger') is None:
             raise Exception("ledger was not found in $PATH")
@@ -155,6 +158,49 @@ class Ledger(object):
             ["-E", "meta", "%s=%s" % (key, Converter.clean_id(value))])
             is not None)
 
+    def xact_account(self, payee, date=None, index=-1):
+        from difflib import SequenceMatcher
+        if Ledger.allTransactions is None:
+            txn = self.run([""])
+            Ledger.allTransactions = txn.findall('.//transactions/transaction')
+        # scores = []
+        maxScore = 0
+        for t in Ledger.allTransactions:
+            tdate = [node.text for node in t.findall('.//date')]
+            tpayee = [node.text for node in t.findall('.//payee')]
+            if len(tpayee) > 0:
+                a = b = None
+                if len(tdate) > 0 and not date is None:
+                    a = "%s %s" % (tdate[0], tpayee[0])
+                    b = "%s %s" % (date, payee)
+                else:
+                    a = "%s" % (tpayee[0])
+                    b = "%s" % (payee)
+                score = SequenceMatcher(None, a, b).ratio()
+                if score > maxScore:
+                    # scores.append((score, t))
+                    maxScore = score
+                    maxTransaction = t
+        if maxScore > 0.5:
+            # print "payee:%s tpayee:%s score:%s" % (payee,[node.text for node in maxTransaction.findall('.//payee')],maxScore)
+            accts = [node.text for node in
+                    maxTransaction.findall('.//postings/posting/account/name')]
+            if accts and len(accts) > index:
+                return accts[index]
+        return None
+
+    def most_similar_account(self, account):
+        txn = self.run(["--real", account])
+        if txn is None:
+            return None
+        else:
+            accts = [node.text for node in
+                        txn.findall('.//transactions/transaction/postings/posting/account/name')]
+            if accts:
+                return accts[-1]
+            else:
+                return None
+
     def get_account_by_payee(self, payee, exclude):
         payee_regex = clean_payee(payee).replace("*", "\\\\*")
         try:
@@ -212,6 +258,14 @@ class LedgerPython(object):
         accts_filtered = [a for a in accts if a.fullname() != exclude]
         if accts_filtered:
             return str(accts_filtered[-1])
+        else:
+            return None
+
+    def most_similar_account(self, account):
+        q = self.journal.query("%s" % (clean_payee(account)))
+        accts = [p.account for p in q]
+        if accts:
+            return str(accts[-1])
         else:
             return None
 

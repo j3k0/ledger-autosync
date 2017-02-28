@@ -18,7 +18,7 @@
 
 from __future__ import absolute_import
 from ofxparse import OfxParser
-from ledgerautosync.converter import CsvConverter
+from ledgerautosync.converter import CsvConverter, OfxConverter
 from ofxparse.ofxparse import InvestmentTransaction
 import logging
 import csv
@@ -28,16 +28,17 @@ class Synchronizer(object):
         self.lgr = lgr
 
 class OfxSynchronizer(Synchronizer):
-    def __init__(self, lgr):
+    def __init__(self, lgr, fid):
         super(OfxSynchronizer, self).__init__(lgr)
+        self.fid = fid
 
     def parse_file(self, path, accountname=None):
         ofx = OfxParser.parse(file(path))
         return (ofx, self.filter(ofx))
 
-    def is_txn_synced(self, acctid, txn):
+    def is_txn_synced(self, fid, acctid, txn):
         ofxid = "%s.%s" % (acctid, txn.id)
-        return self.lgr.check_transaction_by_id("ofxid", ofxid)
+        return self.lgr.check_transaction_by_id("ofxid%s" % fid, ofxid)
 
     def filter(self, ofx):
         txns = ofx.account.statement.transactions
@@ -51,8 +52,10 @@ class OfxSynchronizer(Synchronizer):
         else:
             sorted_txns = sorted(txns, key=lambda t: t.date)
         acctid = ofx.account.account_id
+        converter = OfxConverter(ofx, 'dummy', fid=self.fid)
+        fid = converter.fid
         return [txn for txn in sorted_txns
-                if not(self.is_txn_synced(acctid, txn))]
+                if not(self.is_txn_synced(fid, acctid, txn))]
 
     def get_new_txns(self, acct, max_days=999999, resync=False):
         if resync or (max_days < 7):
@@ -129,4 +132,4 @@ class CsvSynchronizer(Synchronizer):
             return [converter.convert(row)
                     for row in reader
                     if not(self.lgr.check_transaction_by_id(
-                            "csvid", converter.get_csv_id(row)))]
+                            converter.get_csv_metadata(), converter.get_csv_id(row)))]
