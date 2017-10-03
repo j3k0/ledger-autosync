@@ -455,7 +455,7 @@ class PaypalConverter(CsvConverter):
                         Amount(Decimal(row['Net']), currency)
                     ),
                     Posting(
-                        "Liabilities:Transfer:Bank:Lbp:Paypal",
+                        "Liabilities:Transfer:Lbp:Paypal",
                         Amount(Decimal(row['Net']), currency, reverse=True)
                     )]
             else:
@@ -628,8 +628,12 @@ class BlomConverter(CsvConverter):
             payee=payee,
             postings=postings)
 
+# Starting mid 2017, Hubstaff changed the way CSV files are exported
 class HubstaffConverter(CsvConverter):
-    FIELDSET = set(['Organization','Time Zone','Date','Member','Project','Project Hours','Tasks','Task Hours','Activity','Notes'])
+    # old format
+    # FIELDSET = set(['Organization', 'Time Zone', 'Date', 'Member', 'Project', 'Project Hours', 'Tasks', 'Task Hours', 'Activity', 'Notes'])
+    # new format
+    FIELDSET   = set(['Organization', 'Time Zone', 'Date', 'Member', 'Project', 'Task ID',       'Tasks', 'Time',       'Activity', 'Spent', 'Notes'])
 
     def __init__(self, *args, **kwargs):
         super(HubstaffConverter, self).__init__(*args, **kwargs)
@@ -649,7 +653,7 @@ class HubstaffConverter(CsvConverter):
         return ret
 
     def mk_amount(self, row, reverse=False):
-        h,m,s = row['Project Hours'].split(':')
+        h,m,s = row['Time'].split(':')
         h = float(h) + float(m) / 60 + float(s) / 3600
         return Amount(Decimal(h), self.initials(row) + '_h', reverse=reverse)
 
