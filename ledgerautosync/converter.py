@@ -396,16 +396,18 @@ class OfxConverter(Converter):
             dateStr = pos.date.strftime("%Y/%m/%d %H:%M:%S")
             return "P %s %s %s\n" % (dateStr, self.maybe_get_ticker(pos.security), pos.unit_price)
 
+def removeNonAscii(field):
+    return re.sub(r'[^a-zA-Z0-9 ]',r'', field)
 
 class CsvConverter(Converter):
     @staticmethod
     def make_converter(csv, name=None, **kwargs):
-        fieldset = set(csv.fieldnames)
+        fieldset = set(map(removeNonAscii, csv.fieldnames))
         for klass in CsvConverter.__subclasses__():
-            if klass.FIELDSET <= fieldset:
+            if fieldset.issubset(klass.FIELDSET):
                 return klass(csv, name=name, **kwargs)
         # Found no class, bail
-        raise Exception('Cannot determine CSV type')
+        raise Exception('Cannot determine CSV type \n')
 
     # By default, return an MD5 of the key-value pairs in the row.
     # If a better ID is available, should be overridden.
@@ -428,7 +430,7 @@ class CsvConverter(Converter):
 
 
 class PaypalConverter(CsvConverter):
-    FIELDSET = set(['Currency', 'Date', 'Gross', 'Item Title', 'Name', 'Net', 'Status', 'To Email Address', 'Transaction ID', 'Type'])
+    FIELDSET = set(['Status', 'Gross', 'Fee', 'Name', 'Receipt ID', 'Transaction ID', 'Reference Txn ID', 'Currency', 'To Email Address', 'Date', 'Time', 'TimeZone', 'Net', 'Type', 'From Email Address'])
 
     def __init__(self, *args, **kwargs):
         super(PaypalConverter, self).__init__(*args, **kwargs)
@@ -684,7 +686,7 @@ class HubstaffConverter(CsvConverter):
             postings=postings)
 
 class WakatimeConverter(CsvConverter):
-    FIELDSET = set(["Account","Commodity", "Date","Project","Duration","ID"])
+    FIELDSET = set(["Account", "Commodity", "Date", "Project", "Duration", "ID"])
 
     def __init__(self, *args, **kwargs):
         super(WakatimeConverter, self).__init__(*args, **kwargs)
