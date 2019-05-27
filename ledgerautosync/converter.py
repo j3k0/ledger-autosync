@@ -25,6 +25,8 @@ from ledgerautosync import EmptyInstitutionException
 import datetime
 import hashlib
 
+import subprocess
+
 AUTOSYNC_INITIAL = "autosync_initial"
 ALL_AUTOSYNC_INITIAL = "all.%s" % (AUTOSYNC_INITIAL)
 
@@ -160,6 +162,8 @@ class Converter(object):
 
     @staticmethod
     def clean_id(id):
+        if id is None:
+            return None
         return id.replace('/', '_').\
             replace('$', '_').\
             replace(' ', '_').\
@@ -176,13 +180,42 @@ class Converter(object):
         if self.currency == "USD":
             self.currency = "$"
 
-    def mk_dynamic_account(self, payee, exclude, date=None, index=1):
+    def guess_postings(self, payee, amount, currency, date, first_account):
+        postings = [
+            Posting(first_account, Amount(amount, currency))
+        ];
+        index = 1
+        account = self.mk_dynamic_account(payee, exclude=first_account, date=date, index=index)
+        while account is not None:
+            posting = Posting(account, Amount(amount, currency, reverse=True))
+            postings.append(posting)
+            index += 1
+            if index > 15:
+                account = None
+            else:
+                account = self.mk_dynamic_account(payee, exclude=self.name, date=date, index=index)
+        return postings
+
+    def mk_dynamic_account(self, payee, exclude, date=None, index=1, amount=0, currency='USD'):
         if self.lgr is None:
-            return self.unknownaccount or 'Expenses:Unknown'
+            return None
+            # return self.unknownaccount or 'Expenses:Unknown'
         else:
-            account = self.lgr.xact_account(payee, date, index)
-            if account is None:
-                return self.unknownaccount or 'Expenses:Unknown'
+            args = [
+                    "/Users/jeko/.nvm/versions/node/v8.11.3/bin/node", # TODO: make this part of config file
+                    "/Users/jeko/Fovea/Gestion/Accounting/ledger-guesser/index.js",
+                    "--guess",
+                    "/Users/jeko/.ledger-guesser-nn-" + str(index) + ".json",
+                    payee, str(amount), currency ]
+            lines = subprocess.check_output(args, shell=False)
+            lines = lines.split('\n')
+            line = lines[0]
+            split = line.split('  ')
+            account = split[0]
+            # account = self.lgr.xact_account(payee, date, index)
+            if account is None or len(account) < 3:
+                return None
+                # self.unknownaccount or 'Expenses:Unknown'
             else:
                 return account
 
@@ -302,19 +335,21 @@ class OfxConverter(Converter):
         if isinstance(txn, OfxTransaction):
             metadata = {}
             metadata["ofxid%s" % self.fid] = ofxid
+            payee=self.format_payee(txn)
             return Transaction(
                 date=txn.date,
-                payee=self.format_payee(txn),
+                payee=payee,
                 metadata=metadata,
-                postings=[
-                    Posting(
-                        self.name,
-                        Amount(txn.amount, self.currency)
-                    ),
-                    Posting(
-                        self.mk_dynamic_account(self.format_payee(txn), exclude=self.name, date=txn.date, index=1),
-                        Amount(txn.amount, self.currency, reverse=True)
-                    )]
+                postings=self.guess_postings(payee, txn.amount, self.currency, txn.date, self.name)
+                # postings=[
+                #     Posting(
+                #         self.name,
+                #         Amount(txn.amount, self.currency)
+                #     ),
+                #     Posting(
+                #         self.mk_dynamic_account(self.format_payee(txn), exclude=self.name, date=txn.date, index=1),
+                #         Amount(txn.amount, self.currency, reverse=True)
+                #     )]
             )
         elif isinstance(txn, InvestmentTransaction):
             acct1 = self.name
@@ -396,17 +431,18 @@ class OfxConverter(Converter):
             dateStr = pos.date.strftime("%Y/%m/%d %H:%M:%S")
             return "P %s %s %s\n" % (dateStr, self.maybe_get_ticker(pos.security), pos.unit_price)
 
-def removeNonAscii(field):
-    return re.sub(r'[^a-zA-Z0-9 ]',r'', field)
+def removeNonId(field):
+    return re.sub(r'[^a-zA-Z0-9_ .-]',r'', field)
 
 class CsvConverter(Converter):
     @staticmethod
     def make_converter(csv, name=None, **kwargs):
-        fieldset = set(map(removeNonAscii, csv.fieldnames))
+        fieldset = set(map(removeNonId, csv.fieldnames))
         for klass in CsvConverter.__subclasses__():
             if fieldset.issubset(klass.FIELDSET):
                 return klass(csv, name=name, **kwargs)
         # Found no class, bail
+        print fieldset
         raise Exception('Cannot determine CSV type \n')
 
     # By default, return an MD5 of the key-value pairs in the row.
@@ -447,9 +483,9 @@ class PaypalConverter(CsvConverter):
         else:
             payee=re.sub(
                     r"\s+", " ",
-                    "%s %s %s ID: %s, %s"%(row['Name'], row['To Email Address'], row['Item Title'], row['Transaction ID'], row['Type'])).upper()
+                    "%s %s ID: %s, %s"%(row['Name'], row['To Email Address'], row['Transaction ID'], row['Type'])).upper()
             currency = row['Currency']
-            date = datetime.datetime.strptime(row['Date'], "%d/%m/%Y")
+            date = datetime.datetime.strptime(row['Date'], "%m/%d/%Y")
             if "add funds from a bank account" in row['Type'].lower() or row['Type'] == "Charge From Debit Card":
                 postings=[
                     Posting(
@@ -461,15 +497,16 @@ class PaypalConverter(CsvConverter):
                         Amount(Decimal(row['Net']), currency, reverse=True)
                     )]
             else:
-                postings=[
-                    Posting(
-                        self.name,
-                        Amount(Decimal(row['Gross']), currency)
-                    ),
-                    Posting(
-                        self.mk_dynamic_account(payee, exclude=self.name, date=date, index=1),
-                        Amount(Decimal(row['Gross']), currency, reverse=True)
-                    )]
+                postings = self.guess_postings(payee, Decimal(row['Gross']), currency, date, self.name)
+                # postings=[
+                #     Posting(
+                #         self.name,
+                #         Amount(Decimal(row['Gross']), currency)
+                #     ),
+                #     Posting(
+                #         self.mk_dynamic_account(payee, exclude=self.name, date=date, index=1),
+                #         Amount(Decimal(row['Gross']), currency, reverse=True)
+                #     )]
             metadata={}
             metadata[self.get_csv_metadata()] = self.get_csv_id(row)
             return Transaction(
@@ -591,8 +628,14 @@ class UpworkConverter(CsvConverter):
             payee=payee,
             postings=postings)
 
+def cleanPayee(str):
+    return re.sub(r'[^a-zA-Z0-9_. -]',r'', str).replace('  ', ' ').upper()[0:140]
+
+BLOM_TREF = 'Transaction Ref.'
+BLOM_DESC = 'Description'
+BLOM_DATE_FORMAT = '%d/%m/%Y'
 class BlomConverter(CsvConverter):
-    FIELDSET = set(['Currency', 'Business Date','Value Date','Narrative','Amount','Balance','Transac. Ref.'])
+    FIELDSET = set(['Currency', 'Business Date', 'Value Date', BLOM_DESC, 'Amount', 'Balance', BLOM_TREF, 'Details'])
 
     def __init__(self, *args, **kwargs):
         super(BlomConverter, self).__init__(*args, **kwargs)
@@ -602,18 +645,23 @@ class BlomConverter(CsvConverter):
         return "blom%s_tref" % self.id.lower()
 
     def get_csv_id(self, row):
-        h = hashlib.sha224(row['Narrative'] + row['Balance']).hexdigest()[0:12]
-        return "%s-%s"%(Converter.clean_id(row['Transac. Ref.']), h)
+        if (row.get(BLOM_DESC) is not None and row.get('Balance') is not None and row.get(BLOM_TREF) is not None):
+            h = hashlib.sha224(row[BLOM_DESC] + row['Balance']).hexdigest()[0:12]
+            return "%s-%s"%(Converter.clean_id(row[BLOM_TREF]), h)
+        else:
+            return None;
+
 
     def mk_amount(self, row, reverse=False):
         return Amount(Decimal(row['Amount'].replace(',','')), row['Currency'], reverse=reverse)
 
-    # def mk_account(
-
     def convert(self, row):
         account = self.name
-        date = datetime.datetime.strptime(row['Business Date'], "%d-%b-%Y")
-        payee = row['Narrative'].upper()
+        date = datetime.datetime.strptime(row['Business Date'], BLOM_DATE_FORMAT)
+        payee = row[BLOM_DESC]
+        if row.get('Details') != None and len(row['Details']) > 0:
+            payee = payee + ' - ' + row['Details'].replace('\n', ' ')
+        payee = cleanPayee(payee)
         if account is None:
             account = 'Assets:Bank:Blom'
         if float(row['Amount'].replace(',','')) > 0:

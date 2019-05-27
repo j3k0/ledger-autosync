@@ -154,8 +154,9 @@ class Ledger(object):
             return d[0]
 
     def check_transaction_by_id(self, key, value):
-        return (self.get_transaction(
-            ["-E", "meta", "%s=%s" % (key, Converter.clean_id(value))])
+        clean_id = Converter.clean_id(value)
+        return (clean_id is not None) and (self.get_transaction(
+            ["-E", "meta", "%s=%s" % (key, clean_id)])
             is not None)
 
     def xact_account(self, payee, date=None, index=-1):
